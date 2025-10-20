@@ -74,6 +74,16 @@ jobs:
             dest_image="${ALIYUN_REGISTRY}/${ALIYUN_NAME_SPACE}/${name_space_prefix}${image_name_tag}${platform_prefix}"
 
             echo "===> sync  $image  ->  $dest_image"
+            
+            echo "===> sync  $image  ->  $dest_image"
+            echo ##########
+            
+            echo $SRC_CREDS
+            echo $PLATFORM_ARGS
+            echo $image
+            echo $dest_image
+            
+            echo ############
 
             # 构造 skopeo copy 参数
             # 源认证（私有仓库才需要）
