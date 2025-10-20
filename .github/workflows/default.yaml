@@ -1,0 +1,100 @@
+name: SkopeoSync
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+env:
+  ALIYUN_REGISTRY:     ${{ secrets.ALIYUN_REGISTRY }}      # 例：registry.cn-hangzhou.aliyuncs.com
+  ALIYUN_NAME_SPACE:   ${{ secrets.ALIYUN_NAME_SPACE }}    # 例：my-namespace
+  ALIYUN_USER:         ${{ secrets.ALIYUN_REGISTRY_USER }}
+  ALIYUN_PASS:         ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+  # 如果源镜像需要认证，再配下面两个 secret
+  # SRC_USER: ${{ secrets.SRC_USER }}
+  # SRC_PASS: ${{ secrets.SRC_PASS }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update && sudo apt-get install -y skopeo
+
+      # （可选）登录阿里云，避免每次 copy 都输密码
+      - name: Login Aliyun
+        run: |
+          skopeo login -u ${{ env.ALIYUN_USER }} -p ${{ env.ALIYUN_PASS }} ${{ env.ALIYUN_REGISTRY }}
+
+      # ---- 以下逻辑完全沿用你之前的 shell，仅把 docker 命令换成 skopeo ----
+      - name: Sync images with skopeo
+        run: |
+          # 1. 重名检测（原逻辑不动）
+          declare -A duplicate_images temp_map
+          while IFS= read -r line || [ -n "$line" ]; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            image=$(echo "$line" | awk '{print $NF}' | sed 's/@.*//')
+            image_name=$(echo "$image" | awk -F'/' '{print $NF}' | awk -F':' '{print $1}')
+            name_space=$(echo "$image" | awk -F'/' '{if(NF==3) print $2; else if(NF==2) print $1; else print "library"}')
+            if [[ -n "${temp_map[$image_name]}" ]]; then
+              [[ "${temp_map[$image_name]}" != "${name_space}_" ]] && duplicate_images[$image_name]="true"
+            else
+              temp_map[$image_name]="${name_space}_"
+            fi
+          done < images.txt
+
+          # 2. 逐条同步
+          while IFS= read -r line || [ -n "$line" ]; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+            # 解析平台、image、tag 等
+            platform=$(echo "$line" | awk -F'--platform[ =]' '{if(NF>1) print $2}' | awk '{print $1}')
+            image=$(echo "$line" | awk '{print $NF}' | sed 's/@.*//')
+            image_name_tag=$(echo "$image" | awk -F'/' '{print $NF}')
+            name_space=$(echo "$image" | awk -F'/' '{if(NF==3) print $2; else if(NF==2) print $1; else print "library"}')
+            image_name=$(echo "$image_name_tag" | awk -F':' '{print $1}')
+
+            # 拼平台前缀（不需要可删）
+            if [ -z "$platform" ]; then
+              platform_prefix=""
+            else
+              platform_prefix="-${platform//\//_}"
+            fi
+
+            # 重名前缀
+            name_space_prefix=""
+            [[ -n "${duplicate_images[$image_name]}" && -n "$name_space" ]] && name_space_prefix="${name_space}_"
+
+            # 目标镜像
+            dest_image="${ALIYUN_REGISTRY}/${ALIYUN_NAME_SPACE}/${name_space_prefix}${image_name_tag}${platform_prefix}"
+
+            echo "===> sync  $image  ->  $dest_image"
+
+            # 构造 skopeo copy 参数
+            # 源认证（私有仓库才需要）
+            [[ -n "${{ secrets.SRC_USER }}" ]] && SRC_CREDS="--src-creds ${{ secrets.SRC_USER }}:${{ secrets.SRC_PASS }}" || SRC_CREDS=""
+
+            # 平台覆盖（多架构场景）
+            if [ -n "$platform" ]; then
+              read -r os arch <<<${platform//\// }
+              PLATFORM_ARGS="--override-os $os --override-arch $arch"
+            else
+              PLATFORM_ARGS=""
+            fi
+
+            skopeo copy $SRC_CREDS \
+                        --dest-creds ${{ env.ALIYUN_USER }}:${{ env.ALIYUN_PASS }} \
+                        $PLATFORM_ARGS \
+                        docker://$image \
+                        docker://$dest_image
+
+            # 3. 磁盘清理（skopeo 缓存）
+            echo "==== disk clean ===="
+            df -h
+            rm -rf ~/.local/share/containers
+          done < images.txt
