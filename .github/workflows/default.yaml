@@ -86,7 +86,12 @@ jobs:
             else
               PLATFORM_ARGS=""
             fi
-
+            echo ##########
+            echo $SRC_CREDS
+            echo $PLATFORM_ARGS
+            echo $image
+            echo $dest_image
+            echo ############
             skopeo copy $SRC_CREDS \
                         --dest-creds ${{ env.ALIYUN_USER }}:${{ env.ALIYUN_PASS }} \
                         $PLATFORM_ARGS \
